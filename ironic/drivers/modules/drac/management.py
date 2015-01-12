@@ -24,7 +24,6 @@ from oslo.utils import importutils
 
 from ironic.common import boot_devices
 from ironic.common import exception
-from ironic.common.i18n import _
 from ironic.common.i18n import _LE
 from ironic.conductor import task_manager
 from ironic.drivers import base
@@ -103,77 +102,6 @@ def _get_next_boot_mode(node):
     return boot_mode
 
 
-def _create_config_job(node):
-    """Create a configuration job.
-
-    This method is used to apply the pending values created by
-    set_boot_device().
-
-    :param node: an ironic node object.
-    :raises: DracClientError on an error from pywsman library.
-    :raises: DracConfigJobCreationError on an error when creating the job.
-
-    """
-    client = drac_common.get_wsman_client(node)
-    selectors = {'CreationClassName': 'DCIM_BIOSService',
-                 'Name': 'DCIM:BIOSService',
-                 'SystemCreationClassName': 'DCIM_ComputerSystem',
-                 'SystemName': 'DCIM:ComputerSystem'}
-    properties = {'Target': 'BIOS.Setup.1-1',
-                  'ScheduledStartTime': 'TIME_NOW'}
-    doc = client.wsman_invoke(resource_uris.DCIM_BIOSService,
-                              'CreateTargetedConfigJob', selectors, properties)
-    return_value = drac_common.find_xml(doc, 'ReturnValue',
-                                        resource_uris.DCIM_BIOSService).text
-    # NOTE(lucasagomes): Possible return values are: RET_ERROR for error
-    #                    or RET_CREATED job created (but changes will be
-    #                    applied after the reboot)
-    # Boot Management Documentation: http://goo.gl/aEsvUH (Section 8.4)
-    if return_value == drac_common.RET_ERROR:
-        error_message = drac_common.find_xml(doc, 'Message',
-                                           resource_uris.DCIM_BIOSService).text
-        raise exception.DracConfigJobCreationError(error=error_message)
-
-
-def _check_for_config_job(node):
-    """Check if a configuration job is already created.
-
-    :param node: an ironic node object.
-    :raises: DracClientError on an error from pywsman library.
-    :raises: DracConfigJobCreationError if the job is already created.
-
-    """
-    client = drac_common.get_wsman_client(node)
-    try:
-        doc = client.wsman_enumerate(resource_uris.DCIM_LifecycleJob)
-    except exception.DracClientError as exc:
-        with excutils.save_and_reraise_exception():
-            LOG.error(_LE('DRAC driver failed to list the configuration jobs '
-                          'for node %(node_uuid)s. Reason: %(error)s.'),
-                      {'node_uuid': node.uuid, 'error': exc})
-
-    items = drac_common.find_xml(doc, 'DCIM_LifecycleJob',
-                                 resource_uris.DCIM_LifecycleJob,
-                                 find_all=True)
-    for i in items:
-        name = drac_common.find_xml(i, 'Name', resource_uris.DCIM_LifecycleJob)
-        if 'BIOS.Setup.1-1' not in name.text:
-            continue
-
-        job_status = drac_common.find_xml(i, 'JobStatus',
-                                      resource_uris.DCIM_LifecycleJob).text
-        # If job is already completed or failed we can
-        # create another one.
-        # Job Control Documentation: http://goo.gl/o1dDD3 (Section 7.2.3.2)
-        if job_status.lower() not in ('completed', 'failed'):
-            job_id = drac_common.find_xml(i, 'InstanceID',
-                                      resource_uris.DCIM_LifecycleJob).text
-            reason = (_('Another job with ID "%s" is already created '
-                        'to configure the BIOS. Wait until existing job '
-                        'is completed or is cancelled') % job_id)
-            raise exception.DracConfigJobCreationError(error=reason)
-
-
 class DracManagement(base.ManagementInterface):
 
     def get_properties(self):
@@ -221,7 +149,7 @@ class DracManagement(base.ManagementInterface):
 
         """
         # Check for an existing configuration job
-        _check_for_config_job(task.node)
+        drac_common.check_for_config_job(task.node)
 
         client = drac_common.get_wsman_client(task.node)
         filter_query = ("select * from DCIM_BootSourceSetting where "
@@ -267,7 +195,7 @@ class DracManagement(base.ManagementInterface):
             raise exception.DracOperationError(operation='set_boot_device',
                                                error=error_message)
         # Create a configuration job
-        _create_config_job(task.node)
+        drac_common.create_config_job(task.node)
 
     def get_boot_device(self, task):
         """Get the current boot device for a node.

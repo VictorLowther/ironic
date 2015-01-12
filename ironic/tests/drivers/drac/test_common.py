@@ -15,14 +15,20 @@
 Test class for common methods used by DRAC modules.
 """
 
+import mock
+
 from xml.etree import ElementTree
 
 from testtools.matchers import HasLength
 
 from ironic.common import exception
+from ironic.drivers.modules.drac import client as drac_client
 from ironic.drivers.modules.drac import common as drac_common
+from ironic.drivers.modules.drac import resource_uris
+from ironic.tests.conductor import utils as mgr_utils
 from ironic.tests.db import base as db_base
 from ironic.tests.db import utils as db_utils
+from ironic.tests.drivers.drac import utils as test_utils
 from ironic.tests.objects import utils as obj_utils
 
 INFO_DICT = db_utils.get_test_drac_info()
@@ -133,3 +139,75 @@ class DracCommonMethodsTestCase(db_base.DbTestCase):
         self.assertThat(result, HasLength(2))
         result_text = [v.text for v in result]
         self.assertEqual(sorted([value1, value2]), sorted(result_text))
+
+
+@mock.patch.object(drac_client, 'pywsman')
+class DracCommonWsmanMethodsCase(db_base.DbTestCase):
+
+    def setUp(self):
+        super(DracCommonWsmanMethodsCase, self).setUp()
+        mgr_utils.mock_the_extension_manager(driver='fake_drac')
+        self.node = obj_utils.create_test_node(self.context,
+                                               driver='fake_drac',
+                                               driver_info=INFO_DICT)
+
+    def test_check_for_config_job(self, mock_client_pywsman):
+        result_xml = test_utils.build_soap_xml([{'DCIM_LifecycleJob':
+                                                    {'Name': 'fake'}}],
+                                          resource_uris.DCIM_LifecycleJob)
+
+        mock_xml = test_utils.mock_wsman_root(result_xml)
+        mock_pywsman = mock_client_pywsman.Client.return_value
+        mock_pywsman.enumerate.return_value = mock_xml
+
+        result = drac_common.check_for_config_job(self.node)
+
+        self.assertIsNone(result)
+        mock_pywsman.enumerate.assert_called_once_with(mock.ANY, mock.ANY,
+            resource_uris.DCIM_LifecycleJob)
+
+    def test_check_for_config_job_already_exist(self, mock_client_pywsman):
+        result_xml = test_utils.build_soap_xml([{'DCIM_LifecycleJob':
+                                                    {'Name': 'BIOS.Setup.1-1',
+                                                     'JobStatus': 'scheduled',
+                                                     'InstanceID': 'fake'}}],
+                                          resource_uris.DCIM_LifecycleJob)
+
+        mock_xml = test_utils.mock_wsman_root(result_xml)
+        mock_pywsman = mock_client_pywsman.Client.return_value
+        mock_pywsman.enumerate.return_value = mock_xml
+
+        self.assertRaises(exception.DracConfigJobCreationError,
+                          drac_common.check_for_config_job, self.node)
+        mock_pywsman.enumerate.assert_called_once_with(mock.ANY, mock.ANY,
+            resource_uris.DCIM_LifecycleJob)
+
+    def test_create_config_job(self, mock_client_pywsman):
+        result_xml = test_utils.build_soap_xml([{'ReturnValue':
+                                                    drac_common.RET_SUCCESS}],
+                                               resource_uris.DCIM_BIOSService)
+
+        mock_xml = test_utils.mock_wsman_root(result_xml)
+        mock_pywsman = mock_client_pywsman.Client.return_value
+        mock_pywsman.invoke.return_value = mock_xml
+
+        result = drac_common.create_config_job(self.node)
+
+        self.assertIsNone(result)
+        mock_pywsman.invoke.assert_called_once_with(mock.ANY,
+            resource_uris.DCIM_BIOSService, 'CreateTargetedConfigJob', None)
+
+    def test_create_config_job_error(self, mock_client_pywsman):
+        result_xml = test_utils.build_soap_xml([{'ReturnValue':
+                                                    drac_common.RET_ERROR,
+                                                 'Message': 'E_FAKE'}],
+                                               resource_uris.DCIM_BIOSService)
+
+        mock_xml = test_utils.mock_wsman_root(result_xml)
+        mock_pywsman = mock_client_pywsman.Client.return_value
+        mock_pywsman.invoke.return_value = mock_xml
+
+        self.assertRaises(exception.DracConfigJobCreationError,
+                          drac_common.create_config_job, self.node)
+        mock_pywsman.invoke.assert_called_once_with(mock.ANY,
+            resource_uris.DCIM_BIOSService, 'CreateTargetedConfigJob', None)

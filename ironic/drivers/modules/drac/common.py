@@ -15,13 +15,19 @@
 Common functionalities shared between different DRAC modules.
 """
 
+from oslo.utils import excutils
 from oslo.utils import importutils
 
 from ironic.common import exception
 from ironic.common.i18n import _
+from ironic.common.i18n import _LE
 from ironic.drivers.modules.drac import client as drac_client
+from ironic.drivers.modules.drac import resource_uris
+from ironic.openstack.common import log as logging
 
 pywsman = importutils.try_import('pywsman')
+
+LOG = logging.getLogger(__name__)
 
 REQUIRED_PROPERTIES = {
     'drac_host': _('IP address or hostname of the DRAC card. Required.'),
@@ -130,3 +136,76 @@ def find_xml(doc, item, namespace, find_all=False):
     if find_all:
         return doc.findall(query)
     return doc.find(query)
+
+
+def create_config_job(node):
+    """Create a configuration job.
+
+    This method is used to apply the pending values created by
+    set_boot_device().
+
+    :param node: an ironic node object.
+    :raises: DracClientError on an error from pywsman library.
+    :raises: DracConfigJobCreationError on an error when creating the job.
+
+    """
+    client = get_wsman_client(node)
+    selectors = {'CreationClassName': 'DCIM_BIOSService',
+                 'Name': 'DCIM:BIOSService',
+                 'SystemCreationClassName': 'DCIM_ComputerSystem',
+                 'SystemName': 'DCIM:ComputerSystem'}
+    properties = {'Target': 'BIOS.Setup.1-1',
+                  'ScheduledStartTime': 'TIME_NOW'}
+    doc = client.wsman_invoke(resource_uris.DCIM_BIOSService,
+                              'CreateTargetedConfigJob',
+                              selectors,
+                              properties)
+    return_value = find_xml(doc, 'ReturnValue',
+                            resource_uris.DCIM_BIOSService).text
+    # NOTE(lucasagomes): Possible return values are: RET_ERROR for error
+    #                    or RET_CREATED job created (but changes will be
+    #                    applied after the reboot)
+    # Boot Management Documentation: http://goo.gl/aEsvUH (Section 8.4)
+    if return_value == RET_ERROR:
+        error_message = find_xml(doc, 'Message',
+                                 resource_uris.DCIM_BIOSService).text
+        raise exception.DracConfigJobCreationError(error=error_message)
+
+
+def check_for_config_job(node):
+    """Check if a configuration job is already created.
+
+    :param node: an ironic node object.
+    :raises: DracClientError on an error from pywsman library.
+    :raises: DracConfigJobCreationError if the job is already created.
+
+    """
+    client = get_wsman_client(node)
+    try:
+        doc = client.wsman_enumerate(resource_uris.DCIM_LifecycleJob)
+    except exception.DracClientError as exc:
+        with excutils.save_and_reraise_exception():
+            LOG.error(_LE('DRAC driver failed to list the configuration jobs '
+                          'for node %(node_uuid)s. Reason: %(error)s.'),
+                      {'node_uuid': node.uuid, 'error': exc})
+
+    items = find_xml(doc, 'DCIM_LifecycleJob',
+                     resource_uris.DCIM_LifecycleJob,
+                     find_all=True)
+    for i in items:
+        name = find_xml(i, 'Name', resource_uris.DCIM_LifecycleJob)
+        if 'BIOS.Setup.1-1' not in name.text:
+            continue
+
+        job_status = find_xml(i, 'JobStatus',
+                              resource_uris.DCIM_LifecycleJob).text
+        # If job is already completed or failed we can
+        # create another one.
+        # Job Control Documentation: http://goo.gl/o1dDD3 (Section 7.2.3.2)
+        if job_status.lower() not in ('completed', 'failed'):
+            job_id = find_xml(i, 'InstanceID',
+                              resource_uris.DCIM_LifecycleJob).text
+            reason = (_('Another job with ID "%s" is already created '
+                        'to configure the BIOS. Wait until existing job '
+                        'is completed or is cancelled') % job_id)
+            raise exception.DracConfigJobCreationError(error=reason)
