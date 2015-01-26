@@ -105,7 +105,7 @@ def _get_next_boot_mode(node):
     return boot_mode
 
 
-def _create_config_job(node):
+def create_config_job(node):
     """Create a configuration job.
 
     This method is used to apply the pending values created by
@@ -137,7 +137,7 @@ def _create_config_job(node):
                       {'node_uuid': node.uuid, 'error': exc})
 
 
-def _check_for_config_job(node):
+def check_for_config_job(node):
     """Check if a configuration job is already created.
 
     :param node: an ironic node object.
@@ -225,7 +225,7 @@ class DracManagement(base.ManagementInterface):
 
         """
         # Check for an existing configuration job
-        _check_for_config_job(task.node)
+        check_for_config_job(task.node)
 
         client = drac_client.get_wsman_client(task.node)
         filter_query = ("select * from DCIM_BootSourceSetting where "
@@ -269,7 +269,7 @@ class DracManagement(base.ManagementInterface):
                            'error': exc})
 
         # Create a configuration job
-        _create_config_job(task.node)
+        create_config_job(task.node)
 
     def get_boot_device(self, task):
         """Get the current boot device for a node.
